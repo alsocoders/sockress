@@ -68,6 +68,7 @@ export type EventMap = {
   close: { code?: number; reason?: string };
   error: unknown;
   reconnect: { attempt: number };
+  message: any;
 };
 
 type Listener<K extends keyof EventMap> = (payload: EventMap[K]) => void;
@@ -117,7 +118,8 @@ export class SockressClient {
     open: new Set(),
     close: new Set(),
     error: new Set(),
-    reconnect: new Set()
+    reconnect: new Set(),
+    message: new Set()
   };
   private socketEnabled = true;
   private lifecycleTeardown: Array<() => void> = [];
@@ -237,7 +239,13 @@ export class SockressClient {
 
   private handleSocketMessage(raw: string): void {
     try {
-      const payload = JSON.parse(raw) as SocketResponsePayload | SocketErrorPayload;
+      const payload = JSON.parse(raw) as SocketResponsePayload | SocketErrorPayload | any;
+
+      if (payload.type && !payload.id && ['message', 'join', 'leave', 'room_created', 'room_deleted', 'error'].includes(payload.type)) {
+        this.emit('message', payload);
+        return;
+      }
+      
       if (payload.type === 'error') {
         const pending = payload.id ? this.pending.get(payload.id) : null;
         const error = new Error(payload.message);
@@ -484,9 +492,15 @@ function normalizeOptions(options: SockressClientOptions): NormalizedOptions {
   if (!options.baseUrl) {
     throw new Error('baseUrl is required');
   }
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  let fetchImpl = options.fetchImpl ?? globalThis.fetch;
   if (!fetchImpl) {
     throw new Error('Fetch implementation is not available in this environment');
+  }
+  if (fetchImpl === globalThis.fetch && typeof fetchImpl === 'function') {
+    const originalFetch = fetchImpl;
+    fetchImpl = ((...args: Parameters<typeof fetch>) => {
+      return originalFetch.apply(globalThis, args);
+    }) as typeof fetch;
   }
   const wsFactory =
     options.wsFactory ??

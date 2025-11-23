@@ -1,6 +1,6 @@
 {
   "name": "sockress-chat",
-  "version": "0.1.1",
+  "version": "0.2.5",
   "description": "Chat and room management for Sockress - Create rooms, join/leave, and send messages seamlessly.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -53,9 +53,9 @@
     "messaging"
   ],
   "dependencies": {
+    "nanoid": "^5.0.7",
     "sockress": "^0.2.7",
-    "sockress-client": "^0.1.8",
-    "nanoid": "^5.0.7"
+    "sockress-client": "^0.2.5"
   },
   "devDependencies": {
     "@types/node": "^20.14.10"

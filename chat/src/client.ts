@@ -34,9 +34,19 @@ export class ChatClient {
   }
 
   private setupEventListeners(): void {
-    // Note: Real-time events are handled via WebSocket broadcasts from server
-    // For now, clients should poll or use a separate WebSocket connection
-    // This will be enhanced in future versions
+    const messageHandler = (payload: any) => {
+      if (payload && payload.type && !payload.id) {
+        this.handleEvent(payload);
+      }
+    };
+    
+    if ((this.client as any).on) {
+      (this.client as any).on('message', messageHandler);
+      (this.client as any).on('open', () => {
+        (this.client as any).off('message', messageHandler);
+        (this.client as any).on('message', messageHandler);
+      });
+    }
   }
 
   private handleEvent(event: ChatEvent): void {
@@ -150,6 +160,5 @@ export function sockressChatClient(options: ChatClientOptions): ChatClient {
   return new ChatClient(options);
 }
 
-// Backward compatibility
 export const createChatClient = sockressChatClient;
 

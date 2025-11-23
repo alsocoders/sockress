@@ -8,10 +8,11 @@
 
 ## Overview
 
-Sockress is a monorepo containing two packages:
+Sockress is a monorepo containing three packages:
 
 - **[`sockress`](./server)** - Server-side framework (Express-compatible API)
 - **[`sockress-client`](./client)** - Client-side SDK with automatic socket connection
+- **[`sockress-chat`](./chat)** - Chat and room management (optional addon)
 
 Sockress prioritizes WebSocket connections for real-time communication, automatically falling back to HTTP when sockets aren't available. This allows a single codebase to serve both realtime and REST consumers seamlessly.
 
@@ -93,6 +94,38 @@ console.log(response.data); // { message: 'pong' }
 
 ---
 
+### 💬 [sockress-chat](./chat) - Chat Package
+
+Chat and room management for Sockress applications.
+
+**Installation:**
+```bash
+npm install sockress-chat
+```
+
+**Features:**
+- Room management (create, join, leave, delete)
+- Real-time messaging within rooms
+- User tracking and member management
+- Private room support
+- Room capacity limits
+
+**Quick Start:**
+```ts
+import { sockress } from 'sockress';
+import { sockressChatServer } from 'sockress-chat';
+
+const app = sockress();
+const chatServer = sockressChatServer();
+chatServer.setupRoutes(app);
+
+app.listen(3000);
+```
+
+📖 **[Full Chat Documentation](./chat/README.md)**
+
+---
+
 ## Monorepo Structure
 
 ```
@@ -102,6 +135,10 @@ Sockress/
 │   ├── dist/        # Compiled output
 │   └── package.json
 ├── client/          # sockress-client package
+│   ├── src/         # TypeScript source
+│   ├── dist/        # Compiled output
+│   └── package.json
+├── chat/            # sockress-chat package
 │   ├── src/         # TypeScript source
 │   ├── dist/        # Compiled output
 │   └── package.json
@@ -123,6 +160,7 @@ npm run build
 ```bash
 npm run build -w sockress
 npm run build -w sockress-client
+npm run build -w sockress-chat
 ```
 
 ---
@@ -139,6 +177,7 @@ PROPRIETARY - See [LICENSE](./LICENSE) file for details.
 - **GitHub:** https://github.com/alsocoders/sockress
 - **NPM Server Package:** https://www.npmjs.com/package/sockress
 - **NPM Client Package:** https://www.npmjs.com/package/sockress-client
+- **NPM Chat Package:** https://www.npmjs.com/package/sockress-chat
 
 ---
 

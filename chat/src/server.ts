@@ -63,7 +63,17 @@ export class ChatServer {
     if (!this.connectionMap.has(roomId)) {
       this.connectionMap.set(roomId, new Set());
     }
-    this.connectionMap.get(roomId)!.add({ socket, userId });
+    const connections = this.connectionMap.get(roomId)!;
+    
+    for (const conn of connections) {
+      if (conn.userId === userId) {
+        if (conn.socket !== socket) {
+          conn.socket = socket;
+        }
+        return;
+      }
+    }
+    connections.add({ socket, userId });
   }
 
   private unregisterConnection(roomId: string, userId: string): void {
@@ -158,8 +168,8 @@ export class ChatServer {
         }
         this.userRooms.get(userInfo.userId)!.add(roomId);
 
-        const socket = (res as any).socket;
-        if (socket && socket.readyState === 1) {
+        const socket = (res as any).mode?.socket;
+        if (socket) {
           this.registerConnection(roomId, userInfo.userId, socket);
         }
 
@@ -256,8 +266,8 @@ export class ChatServer {
           return res.status(403).json({ error: 'Not a member of this room' });
         }
 
-        const socket = (res as any).socket;
-        if (socket && socket.readyState === 1) {
+        const socket = (res as any).mode?.socket;
+        if (socket) {
           this.registerConnection(roomId, userInfo.userId, socket);
         }
 
@@ -371,6 +381,5 @@ export function sockressChatServer(options?: ChatServerOptions): ChatServer {
   return new ChatServer(options);
 }
 
-// Backward compatibility
 export const createChatServer = sockressChatServer;
 

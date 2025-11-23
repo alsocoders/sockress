@@ -1,14 +1,20 @@
 {
   "name": "sockress-client",
-  "version": "0.1.8",
+  "version": "0.2.5",
   "description": "Socket-first client SDK for Sockress servers with automatic HTTP fallback and FormData serialization.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": {
-      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
   "scripts": {
