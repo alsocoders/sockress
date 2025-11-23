@@ -1,0 +1,63 @@
+{
+  "name": "sockress-chat",
+  "version": "0.1.1",
+  "description": "Chat and room management for Sockress - Create rooms, join/leave, and send messages seamlessly.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./server": {
+      "import": "./dist/server.js",
+      "require": "./dist/server.js",
+      "types": "./dist/server.d.ts"
+    },
+    "./client": {
+      "import": "./dist/client.js",
+      "require": "./dist/client.js",
+      "types": "./dist/client.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "author": {
+    "name": "Also Coder",
+    "email": "hello@alsocoder.com",
+    "url": "https://alsocoder.com"
+  },
+  "homepage": "https://alsocoder.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alsocoders/sockress"
+  },
+  "bugs": {
+    "url": "https://github.com/alsocoders/sockress/issues"
+  },
+  "license": "PROPRIETARY",
+  "keywords": [
+    "sockress",
+    "chat",
+    "rooms",
+    "websocket",
+    "realtime",
+    "messaging"
+  ],
+  "dependencies": {
+    "sockress": "^0.2.7",
+    "sockress-client": "^0.1.8",
+    "nanoid": "^5.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10"
+  }
+}
