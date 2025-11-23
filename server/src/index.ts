@@ -784,7 +784,11 @@ export class SockressApp {
         socket.destroy();
         return;
       }
-      if (!isOriginAllowed(req.headers.origin, this.config.cors.origin)) {
+      const origin = req.headers.origin;
+      if (!isOriginAllowed(origin, this.config.cors.origin)) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn(`[Sockress] WebSocket connection rejected: origin "${origin}" not allowed. Allowed origins:`, this.config.cors.origin);
+        }
         socket.destroy();
         return;
       }

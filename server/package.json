@@ -1,6 +1,6 @@
 {
   "name": "sockress",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Socket-first Express-compatible server with optional HTTP fallback, built-in WebSocket transport, uploader, and static helpers.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
