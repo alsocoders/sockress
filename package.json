@@ -1,0 +1,27 @@
+{
+  "name": "sockress",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Monorepo for the Sockress server and client packages",
+  "scripts": {
+    "build": "npm run build -w sockress && npm run build -w sockress-client",
+    "lint": "echo \"No root lint configured\"",
+    "test": "echo \"No tests defined\""
+  },
+  "keywords": [
+    "sockress",
+    "express",
+    "websocket",
+    "framework"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

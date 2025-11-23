@@ -1,0 +1,48 @@
+{
+  "name": "sockress-client",
+  "version": "0.1.8",
+  "description": "Socket-first client SDK for Sockress servers with automatic HTTP fallback and FormData serialization.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "author": {
+    "name": "Also Coder",
+    "email": "hello@alsocoder.com",
+    "url": "https://alsocoder.com"
+  },
+  "homepage": "https://alsocoder.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alsocoders/sockress"
+  },
+  "bugs": {
+    "url": "https://github.com/alsocoders/sockress/issues"
+  },
+  "license": "PROPRIETARY",
+  "keywords": [
+    "sockress",
+    "websocket",
+    "http",
+    "client",
+    "upload",
+    "realtime",
+    "nodejs",
+    "browser"
+  ],
+  "dependencies": {
+    "nanoid": "^5.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10"
+  }
+}
