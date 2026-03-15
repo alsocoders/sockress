@@ -19,6 +19,7 @@ Sockress is a socket-first Node.js framework that mirrors the Express API while 
 - **Response helpers**: `redirect()`, `sendFile()`, `download()`, `sendStatus()`, `format()`, `location()`, `vary()`
 - **Request helpers**: `accepts()`, `is()`, `param()`, plus `hostname`, `originalUrl`, `baseUrl`, `subdomains`
 - **Parameter middleware** with `app.param()`
+- **Validation** – Optional request/response JSON Schema validation via Ajv (`validate(schema)`, `app.addSchema()`); works for both HTTP and WebSocket
 - **Chainable routes** with `app.route()`
 - Graceful shutdown hooks (automatically closes on `beforeExit`, `SIGINT`, `SIGTERM`)
 - Heartbeat management for long-lived WebSocket connections
@@ -30,6 +31,13 @@ Sockress is a socket-first Node.js framework that mirrors the Express API while 
 ```bash
 npm install sockress
 ```
+
+**Optional Dependencies:**
+
+Sockress keeps its bundle size minimal by making some features optional:
+
+- **Validation** – Install `ajv` for request/response JSON Schema validation: `npm install ajv`
+- **File uploads** – Install `multer` only if you need file uploads: `npm install multer`
 
 Sockress supports both ESM and CommonJS:
 
@@ -217,6 +225,77 @@ app.get('/users/:userId', (req, res) => {
 });
 ```
 
+### Validation
+
+Request and response validation uses **JSON Schema** via [Ajv](https://ajv.js.org/) (optional peer). **Validation is optional.** You can define routes with just a handler and use `req.body` / `res.json(object)` as usual. When you want schema validation, pass a route options object with `schema` before the handler (e.g. `app.post('/', { schema: { body: ... } }, handler)`), or use the `validate(schema)` middleware.
+
+Install Ajv to use validation:
+
+```bash
+npm install ajv
+```
+
+Pass a **route options** object with `schema` anywhere in the handler list (same as middleware). Sockress detects the object and runs validation at that position. The schema can define `body`, `query`, `params`, and `headers` (each a JSON Schema object). Validation runs in order (params → query → headers → body). On failure, Sockress sends **400 Bad Request** with a body like `{ statusCode: 400, error: 'Bad Request', message, validationContext, details }`.
+
+```ts
+import { sockress } from 'sockress';
+
+const app = sockress();
+
+app.post('/users', {
+  schema: {
+    body: {
+      type: 'object',
+      required: ['name', 'email'],
+      properties: {
+        name: { type: 'string' },
+        email: { type: 'string', format: 'email' }
+      }
+    }
+  }
+}, (req, res) => {
+  // req.body is validated and type-coerced (e.g. query/params)
+  res.json({ id: 1, name: req.body.name, email: req.body.email });
+});
+```
+
+With `attachValidation: true` in the options, validation failures do not send a response; instead the error is attached to `req.validationError` and passed to `next(err)`.
+
+```ts
+app.post('/users', {
+  schema: {
+    body: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } }
+  },
+  attachValidation: true
+}, (req, res, next) => {
+  if (req.validationError) {
+    return next(req.validationError);
+  }
+  res.json({ created: true });
+});
+```
+
+You can also use `validate(schema)` as middleware: `app.post('/users', app.validate({ body: ... }), handler)`.
+
+**Shared schemas** – Use `app.addSchema(schema)` to register a schema with a `$id`; then use `$ref` in your route schemas so Ajv can resolve references.
+
+```ts
+app.addSchema({
+  $id: 'https://example.com/schemas/user.json',
+  type: 'object',
+  properties: { name: { type: 'string' }, email: { type: 'string' } }
+});
+app.post('/users', {
+  schema: { body: { $ref: 'https://example.com/schemas/user.json' } }
+}, (req, res) => res.json(req.body));
+```
+
+**Response schema** – You can optionally validate and strip response payloads with a `response` key (e.g. `{ 200: schemaObj, default: schemaObj }`). Only properties declared in the schema are sent (`removeAdditional`).
+
+Validation works for both **HTTP** and **WebSocket** transports; it uses only `req.body`, `req.query`, `req.params`, and `req.headers`, so the same middleware fits both pipelines.
+
+---
+
 ### Error Handling
 
 Error handlers have 4 parameters `(err, req, res, next)`:
@@ -225,6 +304,49 @@ Error handlers have 4 parameters `(err, req, res, next)`:
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: err.message });
+});
+```
+
+---
+
+## Realtime Events (emit / on)
+
+Sockress supports **custom realtime events** over WebSocket in addition to request/response routes.
+
+### Server -> Clients (broadcast)
+
+```ts
+// Broadcast to all connected websocket clients
+app.emit('message', 'hello from server');
+app.emit('any_payload', { ok: true, list: [1, 2, 3] });
+```
+
+### Client -> Server (listen)
+
+```ts
+// Listen to a specific event
+app.on('message', (data, ctx) => {
+  console.log('message:', data);
+  console.log('from ip:', ctx.ip);
+
+  // Reply back to just this socket if you want:
+  app.emitTo(ctx.socket, 'message', { echo: data });
+});
+
+// Listen to all events
+app.on('*', ({ event, data }, ctx) => {
+  console.log('event:', event, 'data:', data);
+});
+```
+
+### Socket-route -> same socket (optional helper)
+
+Inside a socket request handler you can emit back to the same connected socket using:
+
+```ts
+app.post('/ping', (req, res) => {
+  res.emitEvent('pong', { ok: true });
+  res.json({ ok: true });
 });
 ```
 
@@ -381,6 +503,12 @@ const isJson = req.is(['json', 'html']); // returns 'json' or 'html' or false or
 
 ## File Uploads
 
+**Note:** File upload support requires the `multer` package as an optional peer dependency. Install it separately if you need file uploads:
+
+```bash
+npm install multer
+```
+
 Use `createUploader()` to handle file uploads. It works for both HTTP and WebSocket transports:
 
 ```ts
@@ -494,9 +622,38 @@ const app = sockress({
     heartbeatInterval: 30_000,    // heartbeat interval in ms (default: 30000)
     idleTimeout: 120_000          // idle timeout in ms (default: 120000)
   },
-  bodyLimit: 1_000_000          // max body size in bytes (default: 1000000)
+  bodyLimit: 1_000_000,         // max body size in bytes (default: 1000000)
+  logging: false                 // logging level: false | 'error' | 'warn' | 'info' | 'debug' (default: false)
 });
 ```
+
+### Logging
+
+Control internal Sockress logging with the `logging` option:
+
+```ts
+// Disable all logs (default)
+const app = sockress({ logging: false });
+
+// Only show errors
+const app = sockress({ logging: 'error' });
+
+// Show warnings and errors
+const app = sockress({ logging: 'warn' });
+
+// Show info, warnings, and errors
+const app = sockress({ logging: 'info' });
+
+// Show all logs including debug
+const app = sockress({ logging: 'debug' });
+```
+
+Log levels:
+- `false` - No logs (default)
+- `'error'` - Only error logs
+- `'warn'` - Warning and error logs
+- `'info'` - Info, warning, and error logs
+- `'debug'` - All logs (most verbose)
 
 ---
 
