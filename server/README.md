@@ -31,6 +31,14 @@ Sockress is a socket-first Node.js framework that mirrors the Express API while 
 npm install sockress
 ```
 
+**Optional Dependencies:**
+
+Sockress keeps its bundle size minimal by making file upload support optional. Install `multer` only if you need file uploads:
+
+```bash
+npm install multer
+```
+
 Sockress supports both ESM and CommonJS:
 
 ```ts
@@ -230,6 +238,49 @@ app.use((err, req, res, next) => {
 
 ---
 
+## Realtime Events (emit / on)
+
+Sockress supports **custom realtime events** over WebSocket in addition to request/response routes.
+
+### Server -> Clients (broadcast)
+
+```ts
+// Broadcast to all connected websocket clients
+app.emit('message', 'hello from server');
+app.emit('any_payload', { ok: true, list: [1, 2, 3] });
+```
+
+### Client -> Server (listen)
+
+```ts
+// Listen to a specific event
+app.on('message', (data, ctx) => {
+  console.log('message:', data);
+  console.log('from ip:', ctx.ip);
+
+  // Reply back to just this socket if you want:
+  app.emitTo(ctx.socket, 'message', { echo: data });
+});
+
+// Listen to all events
+app.on('*', ({ event, data }, ctx) => {
+  console.log('event:', event, 'data:', data);
+});
+```
+
+### Socket-route -> same socket (optional helper)
+
+Inside a socket request handler you can emit back to the same connected socket using:
+
+```ts
+app.post('/ping', (req, res) => {
+  res.emitEvent('pong', { ok: true });
+  res.json({ ok: true });
+});
+```
+
+---
+
 ## Response Methods
 
 ### Basic Methods
@@ -381,6 +432,12 @@ const isJson = req.is(['json', 'html']); // returns 'json' or 'html' or false or
 
 ## File Uploads
 
+**Note:** File upload support requires the `multer` package as an optional peer dependency. Install it separately if you need file uploads:
+
+```bash
+npm install multer
+```
+
 Use `createUploader()` to handle file uploads. It works for both HTTP and WebSocket transports:
 
 ```ts
@@ -494,9 +551,38 @@ const app = sockress({
     heartbeatInterval: 30_000,    // heartbeat interval in ms (default: 30000)
     idleTimeout: 120_000          // idle timeout in ms (default: 120000)
   },
-  bodyLimit: 1_000_000          // max body size in bytes (default: 1000000)
+  bodyLimit: 1_000_000,         // max body size in bytes (default: 1000000)
+  logging: false                 // logging level: false | 'error' | 'warn' | 'info' | 'debug' (default: false)
 });
 ```
+
+### Logging
+
+Control internal Sockress logging with the `logging` option:
+
+```ts
+// Disable all logs (default)
+const app = sockress({ logging: false });
+
+// Only show errors
+const app = sockress({ logging: 'error' });
+
+// Show warnings and errors
+const app = sockress({ logging: 'warn' });
+
+// Show info, warnings, and errors
+const app = sockress({ logging: 'info' });
+
+// Show all logs including debug
+const app = sockress({ logging: 'debug' });
+```
+
+Log levels:
+- `false` - No logs (default)
+- `'error'` - Only error logs
+- `'warn'` - Warning and error logs
+- `'info'` - Info, warning, and error logs
+- `'debug'` - All logs (most verbose)
 
 ---
 

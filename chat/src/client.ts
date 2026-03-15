@@ -22,6 +22,8 @@ export class ChatClient {
   private options: ChatClientOptions;
   private messageListeners: Map<string, Set<(message: ChatMessage) => void>> = new Map();
   private eventListeners: Set<(event: ChatEvent) => void> = new Set();
+  private processedMessageIds: Set<string> = new Set();
+  private messageHandlerBound: ((payload: any) => void) | null = null;
 
   constructor(options: ChatClientOptions) {
     this.client = options.client;
@@ -34,24 +36,41 @@ export class ChatClient {
   }
 
   private setupEventListeners(): void {
-    const messageHandler = (payload: any) => {
+    if (!(this.client as any).on) {
+      return;
+    }
+
+    this.messageHandlerBound = (payload: any) => {
       if (payload && payload.type && !payload.id) {
         this.handleEvent(payload);
       }
     };
     
-    if ((this.client as any).on) {
-      (this.client as any).on('message', messageHandler);
-      (this.client as any).on('open', () => {
-        (this.client as any).off('message', messageHandler);
-        (this.client as any).on('message', messageHandler);
-      });
-    }
+    (this.client as any).on('message', this.messageHandlerBound);
+    
+    (this.client as any).on('open', () => {
+      if (this.messageHandlerBound) {
+        (this.client as any).off('message', this.messageHandlerBound);
+        (this.client as any).on('message', this.messageHandlerBound);
+      }
+    });
   }
 
   private handleEvent(event: ChatEvent): void {
     if (event.type === 'message' && 'id' in event.data) {
       const message = event.data as ChatMessage;
+      
+      if (this.processedMessageIds.has(message.id)) {
+        return;
+      }
+      
+      this.processedMessageIds.add(message.id);
+      
+      if (this.processedMessageIds.size > 1000) {
+        const firstId = Array.from(this.processedMessageIds)[0];
+        this.processedMessageIds.delete(firstId);
+      }
+      
       const listeners = this.messageListeners.get(message.roomId);
       if (listeners) {
         listeners.forEach(listener => listener(message));

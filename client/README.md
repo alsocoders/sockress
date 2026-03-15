@@ -80,6 +80,24 @@ const response = await api.request({
 });
 ```
 
+#### Query parameters (works for both HTTP and Socket)
+
+You can pass query params either in the path or in the `query` object. Both work for WebSocket and HTTP. If both are used, the `query` object overrides URL params for conflicting keys:
+
+```ts
+// URL style
+await api.get('/api/users?page=1&limit=10');
+
+// Object style
+await api.get('/api/users', { query: { page: 1, limit: 10 } });
+
+// Combined: object overrides URL for same keys
+await api.request({
+  path: '/api/users?page=1&limit=10',
+  query: { page: 2 }  // page becomes 2, limit stays 10
+});
+```
+
 ### `api.get(path, options?)`
 
 ```ts
@@ -169,6 +187,30 @@ console.log(response.body.avatarUrl);
 
 The client automatically serializes `FormData` for socket transport and uses native `FormData` for HTTP fallback.
 
+### Upload Progress Tracking
+
+Track upload progress with the `onProgress` callback:
+
+```ts
+const formData = new FormData();
+formData.append('video', largeVideoFile);
+
+const response = await api.post('/api/upload', {
+  body: formData,
+  onProgress: (progress) => {
+    console.log(`Uploaded: ${progress.loaded} / ${progress.total} bytes`);
+    console.log(`Progress: ${progress.percentage}%`);
+  }
+});
+```
+
+The `onProgress` callback receives an object with:
+- `loaded`: Number of bytes uploaded so far
+- `total`: Total bytes to upload (may be undefined if size is unknown)
+- `percentage`: Upload percentage (0-100, undefined if total is unknown)
+
+**Note:** Progress tracking works for both HTTP (using XMLHttpRequest) and WebSocket (during FormData serialization) transports.
+
 ---
 
 ## Events
@@ -196,6 +238,33 @@ api.on('reconnect', ({ attempt }) => {
   console.log('Reconnecting, attempt:', attempt);
 });
 ```
+
+### Custom Realtime Events (emit / on)
+
+Send arbitrary realtime events over the WebSocket transport:
+
+```ts
+// Client -> Server
+api.emit('message', 'hello');
+api.emit('any_payload', { ok: true, list: [1, 2, 3] });
+```
+
+Receive events sent by the server:
+
+```ts
+api.on('message', (payload) => {
+  // Note: `message` is also used internally as a legacy channel,
+  // so you'll usually receive an object like:
+  // { type: 'event', event: 'message', data: <your data> }
+  console.log('message event:', payload);
+});
+
+api.on('user_typing', (data) => {
+  console.log('user_typing:', data);
+});
+```
+
+Server can broadcast events using `app.emit('eventName', data)`.
 
 Remove listeners:
 
@@ -304,6 +373,17 @@ Request body. Can be:
 - `Blob` or `ArrayBuffer`
 - `URLSearchParams`
 - String
+
+### `onProgress` (optional)
+Callback function to track upload progress. Receives an object with `loaded`, `total`, and `percentage` properties:
+
+```ts
+onProgress: (progress) => {
+  console.log(`${progress.percentage}% uploaded`);
+}
+```
+
+Works for both HTTP and WebSocket transports when uploading files via `FormData` or `Blob`.
 
 ### `timeout` (optional)
 Request timeout in milliseconds (overrides default)

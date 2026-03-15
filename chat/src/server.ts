@@ -15,6 +15,7 @@ export interface ChatServerOptions {
 export class ChatServer {
   private rooms: Map<string, Room> = new Map();
   private userRooms: Map<string, Set<string>> = new Map();
+  private userSocketMap: Map<string, any> = new Map();
   private options: Required<Pick<ChatServerOptions, 'pathPrefix'>> & ChatServerOptions;
 
   constructor(options: ChatServerOptions = {}) {
@@ -35,58 +36,136 @@ export class ChatServer {
     };
   }
 
-  private connectionMap: Map<string, Set<{ socket: any; userId: string }>> = new Map();
+  private connectionMap: Map<string, Map<string, { socket: any; userId: string }>> = new Map();
 
-  private broadcastToRoom(roomId: string, event: ChatEvent, excludeUserId?: string): void {
+  private broadcastToRoom(roomId: string, event: ChatEvent, excludeUserId?: string, currentSocket?: any, currentUserId?: string): void {
     const room = this.rooms.get(roomId);
     if (!room) return;
 
-    const connections = this.connectionMap.get(roomId);
-    if (!connections) return;
+    if (!this.connectionMap.has(roomId)) {
+      this.connectionMap.set(roomId, new Map());
+    }
+    const connections = this.connectionMap.get(roomId)!;
+
+    // Register current socket connection first (for sender)
+    if (currentSocket && currentUserId && currentSocket.readyState === 1) {
+      this.registerConnection(roomId, currentUserId, currentSocket);
+      // Also ensure it's in the connections map for this broadcast
+      if (!connections.has(currentUserId)) {
+        connections.set(currentUserId, { socket: currentSocket, userId: currentUserId });
+      } else {
+        // Update if socket changed
+        const existing = connections.get(currentUserId);
+        if (existing && existing.socket !== currentSocket) {
+          connections.set(currentUserId, { socket: currentSocket, userId: currentUserId });
+        }
+      }
+    }
+
+    // Add all other room members' connections
+    for (const memberId of room.members) {
+      if (memberId === excludeUserId) continue;
+      
+      const memberSocket = this.userSocketMap.get(memberId);
+      if (memberSocket && memberSocket.readyState === 1) {
+        if (!connections.has(memberId)) {
+          connections.set(memberId, { socket: memberSocket, userId: memberId });
+        } else {
+          const existing = connections.get(memberId);
+          if (existing && existing.socket !== memberSocket) {
+            connections.set(memberId, { socket: memberSocket, userId: memberId });
+          }
+        }
+      }
+    }
+
+    if (connections.size === 0) {
+      return;
+    }
 
     const eventData = JSON.stringify(event);
-    for (const conn of connections) {
+    const toRemove: string[] = [];
+    
+    for (const [key, conn] of connections.entries()) {
       if (conn.userId === excludeUserId) continue;
-      if (conn.socket && conn.socket.readyState === 1) {
+      
+      if (!conn.socket) {
+        toRemove.push(key);
+        continue;
+      }
+      
+      if (conn.socket.readyState === 1) {
         try {
           conn.socket.send(eventData);
         } catch (error) {
-          connections.delete(conn);
+          console.error(`[Chat] Failed to send to ${conn.userId} in ${roomId}:`, error);
+          toRemove.push(key);
         }
       } else {
-        connections.delete(conn);
+        toRemove.push(key);
       }
+    }
+    
+    for (const key of toRemove) {
+      const conn = connections.get(key);
+      if (conn) {
+        connections.delete(key);
+        const currentSocket = this.userSocketMap.get(conn.userId);
+        if (currentSocket === conn.socket) {
+          const userRoomIds = this.userRooms.get(conn.userId);
+          if (!userRoomIds || userRoomIds.size === 0) {
+            this.userSocketMap.delete(conn.userId);
+          }
+        }
+      }
+    }
+    
+    if (connections.size === 0) {
+      this.connectionMap.delete(roomId);
     }
   }
 
   private registerConnection(roomId: string, userId: string, socket: any): void {
-    if (!this.connectionMap.has(roomId)) {
-      this.connectionMap.set(roomId, new Set());
+    if (!socket) {
+      return;
     }
-    const connections = this.connectionMap.get(roomId)!;
     
-    for (const conn of connections) {
-      if (conn.userId === userId) {
-        if (conn.socket !== socket) {
-          conn.socket = socket;
-        }
-        return;
-      }
+    if (socket.readyState !== 1) {
+      return;
     }
-    connections.add({ socket, userId });
+    
+    this.userSocketMap.set(userId, socket);
+    
+    const userRoomIds = this.userRooms.get(userId);
+    if (userRoomIds) {
+      for (const rid of userRoomIds) {
+        if (!this.connectionMap.has(rid)) {
+          this.connectionMap.set(rid, new Map());
+        }
+        const connections = this.connectionMap.get(rid)!;
+        connections.set(userId, { socket, userId });
+      }
+    } else {
+      if (!this.connectionMap.has(roomId)) {
+        this.connectionMap.set(roomId, new Map());
+      }
+      const connections = this.connectionMap.get(roomId)!;
+      connections.set(userId, { socket, userId });
+    }
   }
 
   private unregisterConnection(roomId: string, userId: string): void {
     const connections = this.connectionMap.get(roomId);
     if (connections) {
-      for (const conn of connections) {
-        if (conn.userId === userId) {
-          connections.delete(conn);
-        }
-      }
+      connections.delete(userId);
       if (connections.size === 0) {
         this.connectionMap.delete(roomId);
       }
+    }
+    
+    const userRoomIds = this.userRooms.get(userId);
+    if (!userRoomIds || userRoomIds.size === 0) {
+      this.userSocketMap.delete(userId);
     }
   }
 
@@ -168,9 +247,18 @@ export class ChatServer {
         }
         this.userRooms.get(userInfo.userId)!.add(roomId);
 
-        const socket = (res as any).mode?.socket;
-        if (socket) {
+        const socket = (res as any).getSocket ? (res as any).getSocket() : (res as any).mode?.socket;
+        
+        // Register connection immediately if socket is available
+        if (socket && socket.readyState === 1) {
           this.registerConnection(roomId, userInfo.userId, socket);
+        } else {
+          // If socket not available yet, register it in userSocketMap for later
+          // This ensures messages can be sent even if socket wasn't ready during join
+          const existingSocket = this.userSocketMap.get(userInfo.userId);
+          if (existingSocket && existingSocket.readyState === 1) {
+            this.registerConnection(roomId, userInfo.userId, existingSocket);
+          }
         }
 
         const joinMessage: ChatMessage = {
@@ -183,7 +271,9 @@ export class ChatServer {
           type: 'join'
         };
 
-        this.broadcastToRoom(roomId, { type: 'join', data: joinMessage }, userInfo.userId);
+        const joinEvent: ChatEvent = { type: 'join', data: joinMessage };
+        // Don't exclude sender - they should see their own join message
+        this.broadcastToRoom(roomId, joinEvent, undefined, socket, userInfo.userId);
 
         if (this.options.onUserJoin) {
           this.options.onUserJoin(roomId, userInfo.userId);
@@ -230,7 +320,7 @@ export class ChatServer {
           type: 'leave'
         };
 
-        this.broadcastToRoom(roomId, { type: 'leave', data: leaveMessage }, userInfo.userId);
+        this.broadcastToRoom(roomId, { type: 'leave', data: leaveMessage }, userInfo.userId, undefined, userInfo.userId);
 
         if (room.members.size === 0) {
           this.rooms.delete(roomId);
@@ -266,9 +356,17 @@ export class ChatServer {
           return res.status(403).json({ error: 'Not a member of this room' });
         }
 
-        const socket = (res as any).mode?.socket;
-        if (socket) {
+        const socket = (res as any).getSocket ? (res as any).getSocket() : (res as any).mode?.socket;
+        
+        // Ensure connection is registered before sending message
+        if (socket && socket.readyState === 1) {
           this.registerConnection(roomId, userInfo.userId, socket);
+        } else {
+          // Try to get existing socket connection
+          const existingSocket = this.userSocketMap.get(userInfo.userId);
+          if (existingSocket && existingSocket.readyState === 1) {
+            this.registerConnection(roomId, userInfo.userId, existingSocket);
+          }
         }
 
         const chatMessage: ChatMessage = {
@@ -282,7 +380,8 @@ export class ChatServer {
         };
 
         const event: ChatEvent = { type: 'message', data: chatMessage };
-        this.broadcastToRoom(roomId, event);
+        // Broadcast to all including sender - sender needs to receive their own message
+        this.broadcastToRoom(roomId, event, undefined, socket, userInfo.userId);
 
         if (this.options.onMessage) {
           this.options.onMessage(chatMessage);

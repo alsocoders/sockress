@@ -2,11 +2,9 @@ import http, { IncomingMessage, ServerResponse } from 'http';
 import { AddressInfo } from 'net';
 import type { Socket } from 'net';
 import { TLSSocket } from 'tls';
+import crypto from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
-import { parse as parseCookie, serialize as serializeCookie } from 'cookie';
-import type { CookieSerializeOptions } from 'cookie';
-import { nanoid } from 'nanoid';
-import multer, { Options as MulterOptions } from 'multer';
+import type { Options as MulterOptions } from 'multer';
 import type { Multer } from 'multer';
 import path from 'path';
 import fs from 'fs';
@@ -23,12 +21,15 @@ type HTTPMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTION
 
 export type NextFunction = (err?: unknown) => void;
 export type SockressHandler = (req: SockressRequest, res: SockressResponse, next: NextFunction) => unknown;
-export type SockressErrorHandler = (err: unknown, req: SockressRequest, res: SockressResponse, next: NextFunction) => unknown;
+export type SockressErrorHandler = (err: unknown, req: SockressRequest, res: SockressResponse, next?: NextFunction) => unknown;
+
+export type SockressLogLevel = false | 'error' | 'warn' | 'info' | 'debug';
 
 export interface SockressOptions {
   cors?: Partial<CorsOptions>;
   socket?: Partial<SocketOptions>;
   bodyLimit?: number;
+  logging?: SockressLogLevel;
 }
 
 interface SocketOptions {
@@ -50,6 +51,47 @@ interface NormalizedOptions {
   cors: CorsOptions;
   socket: SocketOptions;
   bodyLimit: number;
+  logging: SockressLogLevel;
+}
+
+class SockressLogger {
+  private level: SockressLogLevel;
+
+  constructor(level: SockressLogLevel) {
+    this.level = level;
+  }
+
+  private shouldLog(level: 'error' | 'warn' | 'info' | 'debug'): boolean {
+    if (this.level === false) return false;
+    const levels: Record<string, number> = { error: 0, warn: 1, info: 2, debug: 3 };
+    const currentLevel = levels[this.level] ?? 0;
+    const requestedLevel = levels[level] ?? 0;
+    return requestedLevel <= currentLevel;
+  }
+
+  error(...args: unknown[]): void {
+    if (this.shouldLog('error')) {
+      console.error(...args);
+    }
+  }
+
+  warn(...args: unknown[]): void {
+    if (this.shouldLog('warn')) {
+      console.warn(...args);
+    }
+  }
+
+  info(...args: unknown[]): void {
+    if (this.shouldLog('info')) {
+      console.log(...args);
+    }
+  }
+
+  debug(...args: unknown[]): void {
+    if (this.shouldLog('debug')) {
+      console.log(...args);
+    }
+  }
 }
 
 export interface SockressUploaderOptions {
@@ -106,26 +148,48 @@ type RequestMode =
   | { kind: 'http'; req: IncomingMessage; res: ServerResponse }
   | { kind: 'socket'; socket: WebSocket; requestId: string };
 
-interface IncomingSocketMessage {
-  type: 'request';
-  id?: string;
-  method?: string;
-  path?: string;
-  headers?: Record<string, string | string[]>;
-  query?: Record<string, string | string[]>;
-  body?: unknown;
+type IncomingSocketMessage =
+  | {
+      type: 'request';
+      id?: string;
+      method?: string;
+      path?: string;
+      headers?: Record<string, string | string[]>;
+      query?: Record<string, string | string[]>;
+      body?: unknown;
+    }
+  | {
+      type: 'event';
+      event?: string;
+      data?: unknown;
+    };
+
+type OutgoingSocketMessage =
+  | {
+      type: 'response' | 'error';
+      id?: string;
+      status?: number;
+      headers?: Record<string, string>;
+      body?: unknown;
+      message?: string;
+      code?: string;
+      cookies?: string[];
+    }
+  | {
+      type: 'event';
+      event: string;
+      data?: unknown;
+    };
+
+export interface SockressSocketContext {
+  socket: WebSocket;
+  raw: IncomingMessage;
+  headers: Record<string, string | string[] | undefined>;
+  cookies: Record<string, string>;
+  ip: string | undefined;
 }
 
-interface OutgoingSocketMessage {
-  type: 'response' | 'error';
-  id?: string;
-  status?: number;
-  headers?: Record<string, string>;
-  body?: unknown;
-  message?: string;
-  code?: string;
-  cookies?: string[];
-}
+export type SockressSocketEventHandler = (data: unknown, ctx: SockressSocketContext) => void;
 
 export interface SockressUploadedFile {
   fieldName: string;
@@ -246,29 +310,106 @@ export class SockressRequestImpl implements SockressRequest {
 export class SockressResponse {
   private statusCode = 200;
   private sent = false;
+  private streaming = false;
   private headers: Record<string, string> = {};
   private cookies: string[] = [];
-  public readonly raw?: ServerResponse;
+  private _raw?: ServerResponse & { _sockressHeadersApplied?: boolean };
 
   constructor(
     private readonly mode: RequestMode,
     private readonly cors: CorsOptions,
-    private readonly allowedOrigin: string
+    private readonly allowedOrigin: string,
+    private readonly logger: SockressLogger
   ) {
     if (mode.kind === 'http') {
-      this.raw = mode.res;
+      this._raw = mode.res as ServerResponse & { _sockressHeadersApplied?: boolean };
     }
+  }
+
+  get raw(): ServerResponse | undefined {
+    if (this.mode.kind === 'http' && this._raw) {
+      this.ensureHeadersApplied();
+      return this._raw;
+    }
+    return this._raw;
+  }
+
+  private ensureHeadersApplied(): void {
+    if (this.mode.kind !== 'http' || !this._raw || this._raw.headersSent) {
+      return;
+    }
+    if (this._raw._sockressHeadersApplied) {
+      return;
+    }
+    const headersWithCors = this.buildHeaders();
+    this._raw.statusCode = this.statusCode;
+    Object.entries(headersWithCors).forEach(([key, value]) => {
+      if (!this._raw!.getHeader(key)) {
+        this._raw!.setHeader(key, value);
+      }
+    });
+    if (this.cookies.length) {
+      this._raw.setHeader('Set-Cookie', this.cookies);
+    }
+    this._raw._sockressHeadersApplied = true;
   }
 
   status(code: number): this {
     this.statusCode = code;
+    if (this._raw && !this._raw.headersSent) {
+      try {
+        this._raw.statusCode = code;
+      } catch (error) {
+        // Ignore errors if status can't be set
+      }
+    }
     return this;
   }
 
   set(field: string, value: string): this {
+    if (this.sent && !this.streaming) {
+      this.logger.warn(`[Sockress] Cannot set header "${field}" after response has been sent`);
+      return this;
+    }
     this.headers[field.toLowerCase()] = value;
+    if (this._raw && !this._raw.headersSent) {
+      try {
+        this._raw.setHeader(field, value);
+      } catch (error) {
+        // Ignore errors if header can't be set
+      }
+    }
     return this;
   }
+
+  setHeader(name: string, value: string | number | string[]): this {
+    return this.set(name, Array.isArray(value) ? value.join(', ') : String(value));
+  }
+
+  getHeader(name: string): string | number | string[] | undefined {
+    if (this._raw) {
+      return this._raw.getHeader(name);
+    }
+    return this.headers[name.toLowerCase()];
+  }
+
+  removeHeader(name: string): this {
+    if (this.sent && !this.streaming) {
+      this.logger.warn(`[Sockress] Cannot remove header "${name}" after response has been sent`);
+      return this;
+    }
+    delete this.headers[name.toLowerCase()];
+    if (this._raw && !this._raw.headersSent) {
+      try {
+        this._raw.removeHeader(name);
+      } catch (error) {
+        // Ignore errors if header can't be removed
+      }
+    }
+    return this;
+  }
+
+
 
   append(field: string, value: string): this {
     const current = this.headers[field.toLowerCase()];
@@ -276,6 +417,13 @@ export class SockressResponse {
       this.headers[field.toLowerCase()] = `${current}, ${value}`;
     } else {
       this.headers[field.toLowerCase()] = value;
+    }
+    if (this._raw && !this._raw.headersSent) {
+      try {
+        this._raw.appendHeader(field, value);
+      } catch (error) {
+        // Ignore errors if header can't be appended
+      }
     }
     return this;
   }
@@ -295,35 +443,54 @@ export class SockressResponse {
   }
 
   send(payload?: unknown): this {
-    if (this.sent) {
+    if (this.sent || this.streaming) {
       return this;
     }
     this.sent = true;
     if (!this.headers['content-type'] && typeof payload === 'string') {
-      this.set('content-type', 'text/plain; charset=utf-8');
+      this.headers['content-type'] = 'text/plain; charset=utf-8';
     }
     const headersWithCors = this.buildHeaders();
     if (this.mode.kind === 'http') {
       const res = this.mode.res;
-      res.statusCode = this.statusCode;
-      Object.entries(headersWithCors).forEach(([key, value]) => {
-        res.setHeader(key, value);
-      });
-      if (this.cookies.length) {
-        res.setHeader('Set-Cookie', this.cookies);
+      // Check if headers have already been sent
+      if (res.headersSent) {
+        this.logger.warn('[Sockress] Attempted to send response after headers were already sent');
+        return this;
       }
-      if (Buffer.isBuffer(payload)) {
-        res.end(payload);
-      } else if (typeof payload === 'string') {
-        res.end(payload);
-      } else if (payload === undefined || payload === null) {
-        res.end();
-      } else {
-        const buffer = Buffer.from(JSON.stringify(payload));
-        if (!this.headers['content-type']) {
-          res.setHeader('content-type', 'application/json; charset=utf-8');
+      try {
+        res.statusCode = this.statusCode;
+        Object.entries(headersWithCors).forEach(([key, value]) => {
+          res.setHeader(key, value);
+        });
+        if (this.cookies.length) {
+          res.setHeader('Set-Cookie', this.cookies);
         }
-        res.end(buffer);
+        if (Buffer.isBuffer(payload)) {
+          res.end(payload);
+        } else if (typeof payload === 'string') {
+          res.end(payload);
+        } else if (payload === undefined || payload === null) {
+          res.end();
+        } else {
+          const buffer = Buffer.from(JSON.stringify(payload));
+          if (!this.headers['content-type']) {
+            res.setHeader('content-type', 'application/json; charset=utf-8');
+          }
+          res.end(buffer);
+        }
+      } catch (error) {
+        this.logger.error('[Sockress] Error sending response:', error);
+        // Try to send error response if possible
+        if (!res.headersSent) {
+          try {
+            res.statusCode = 500;
+            res.setHeader('content-type', 'application/json; charset=utf-8');
+            res.end(JSON.stringify({ error: 'Internal Server Error', details: error instanceof Error ? error.message : String(error) }));
+          } catch {
+            // Ignore if we can't send error response
+          }
+        }
       }
       return this;
     }
@@ -340,7 +507,56 @@ export class SockressResponse {
     return this;
   }
 
-  end(): this {
+  end(chunk?: any, encoding?: BufferEncoding, callback?: () => void): this {
+    if (this.sent || (this._raw && (this._raw.writableEnded || this._raw.destroyed))) {
+      return this;
+    }
+    if (this.streaming) {
+      if (this.mode.kind === 'http' && this._raw) {
+        try {
+          if (encoding !== undefined && callback !== undefined) {
+            this._raw.end(chunk, encoding, callback);
+          } else if (encoding !== undefined) {
+            this._raw.end(chunk, encoding);
+          } else if (callback !== undefined) {
+            this._raw.end(chunk, callback);
+          } else if (chunk !== undefined) {
+            this._raw.end(chunk);
+          } else {
+            this._raw.end();
+          }
+          this.sent = true;
+        } catch (error) {
+          this.logger.error('[Sockress] Error ending stream:', error);
+        }
+        return this;
+      }
+    }
+    if (chunk !== undefined || encoding !== undefined || callback !== undefined) {
+      if (this.mode.kind === 'http' && this._raw) {
+        if (!this.streaming) {
+          this.streaming = true;
+          this.ensureHeadersApplied();
+        }
+        try {
+          if (encoding !== undefined && callback !== undefined) {
+            this._raw.end(chunk, encoding, callback);
+          } else if (encoding !== undefined) {
+            this._raw.end(chunk, encoding);
+          } else if (callback !== undefined) {
+            this._raw.end(chunk, callback);
+          } else if (chunk !== undefined) {
+            this._raw.end(chunk);
+          } else {
+            this._raw.end();
+          }
+          this.sent = true;
+        } catch (error) {
+          this.logger.error('[Sockress] Error ending stream:', error);
+        }
+        return this;
+      }
+    }
     return this.send();
   }
 
@@ -452,6 +668,155 @@ export class SockressResponse {
     return this;
   }
 
+  getSocket(): WebSocket | undefined {
+    if (this.mode.kind === 'socket') {
+      return this.mode.socket;
+    }
+    return undefined;
+  }
+
+  /**
+   * Emit a realtime event to the connected socket (socket requests only).
+   * No-op for HTTP requests.
+   *
+   * NOTE: Named `emitEvent` because `res.emit()` already exists for HTTP stream events.
+   */
+  emitEvent(event: string, data?: unknown): this {
+    if (this.mode.kind !== 'socket') {
+      return this;
+    }
+    const name = String(event);
+    if (!name) {
+      return this;
+    }
+    const message: OutgoingSocketMessage = {
+      type: 'event',
+      event: name,
+      data
+    };
+    try {
+      this.mode.socket.send(JSON.stringify(message));
+    } catch {
+      // ignore send errors
+    }
+    return this;
+  }
+
+  pipe(destination: NodeJS.WritableStream): this {
+    if (this.mode.kind !== 'http' || !this._raw) {
+      throw new Error('Streaming is only supported for HTTP requests');
+    }
+    if (this.sent) {
+      throw new Error('Cannot pipe after response has been sent');
+    }
+    if (!this.streaming) {
+      this.streaming = true;
+      this.ensureHeadersApplied();
+    }
+    if (destination && typeof destination === 'object' && 'pipe' in destination) {
+      (destination as any).pipe(this._raw);
+    } else {
+      this._raw.pipe(destination as any);
+    }
+    return this;
+  }
+
+  write(chunk: any, encoding?: BufferEncoding, callback?: (error?: Error | null) => void): boolean {
+    if (this.mode.kind !== 'http' || !this._raw) {
+      if (callback) {
+        callback(new Error('Streaming is only supported for HTTP requests'));
+      }
+      return false;
+    }
+    if (this.sent || this._raw.writableEnded || this._raw.destroyed) {
+      if (callback) {
+        callback(new Error('Cannot write after response has been sent or ended'));
+      }
+      return false;
+    }
+    if (!this.streaming) {
+      this.streaming = true;
+      this.ensureHeadersApplied();
+    }
+    try {
+      if (encoding !== undefined && callback !== undefined) {
+        return this._raw.write(chunk, encoding, callback);
+      } else if (encoding !== undefined) {
+        return this._raw.write(chunk, encoding);
+      } else if (callback !== undefined) {
+        return this._raw.write(chunk, callback);
+      } else {
+        return this._raw.write(chunk);
+      }
+    } catch (error) {
+      if (callback) {
+        callback(error instanceof Error ? error : new Error(String(error)));
+      }
+      return false;
+    }
+  }
+
+  on(event: string, listener: (...args: any[]) => void): this {
+    if (this.mode.kind === 'http' && this._raw) {
+      this._raw.on(event, listener);
+    }
+    return this;
+  }
+
+  once(event: string, listener: (...args: any[]) => void): this {
+    if (this.mode.kind === 'http' && this._raw) {
+      this._raw.once(event, listener);
+    }
+    return this;
+  }
+
+  off(event: string, listener: (...args: any[]) => void): this {
+    if (this.mode.kind === 'http' && this._raw) {
+      this._raw.off(event, listener);
+    }
+    return this;
+  }
+
+  removeListener(event: string, listener: (...args: any[]) => void): this {
+    if (this.mode.kind === 'http' && this._raw) {
+      this._raw.removeListener(event, listener);
+    }
+    return this;
+  }
+
+  removeAllListeners(event?: string): this {
+    if (this.mode.kind === 'http' && this._raw) {
+      this._raw.removeAllListeners(event);
+    }
+    return this;
+  }
+
+  emit(event: string, ...args: any[]): boolean {
+    if (this.mode.kind === 'http' && this._raw) {
+      return this._raw.emit(event, ...args);
+    }
+    return false;
+  }
+
+  listeners(event: string): Function[] {
+    if (this.mode.kind === 'http' && this._raw) {
+      return this._raw.listeners(event);
+    }
+    return [];
+  }
+
+  listenerCount(event: string): number {
+    if (this.mode.kind === 'http' && this._raw) {
+      return this._raw.listenerCount(event);
+    }
+    return 0;
+  }
+
+  addListener(event: string, listener: (...args: any[]) => void): this {
+    return this.on(event, listener);
+  }
+
+
   private buildHeaders(): Record<string, string> {
     const headers = { ...this.headers };
     headers['access-control-allow-origin'] = this.allowedOrigin;
@@ -487,6 +852,11 @@ export class SockressRouter {
     }
     for (const handler of stack) {
       if (!handler) continue;
+      // Error handler detection: 4 parameters = error handler (err, req, res, next)
+      // 3 parameters can be error handler (err, req, res) if next is optional
+      // We detect by length: 4 = definitely error handler, 3 = could be error handler or regular middleware
+      // For now, only 4 parameters = error handler (Express standard)
+      // 3-parameter error handlers will be detected dynamically when err is present
       this.middlewares.push({
         path,
         handler,
@@ -637,17 +1007,28 @@ export class SockressAppRoute {
   }
 }
 
+interface StackEntry {
+  type: 'middleware' | 'route';
+  middleware?: MiddlewareLayer;
+  route?: RouteLayer;
+}
+
 export class SockressApp {
-  private middlewares: MiddlewareLayer[] = [];
-  private routes: RouteLayer[] = [];
+  private stack: StackEntry[] = [];
   private paramHandlers: Map<string, SockressHandler> = new Map();
   private server?: http.Server;
   private wss?: WebSocketServer;
   private heartbeatInterval?: NodeJS.Timeout;
   private shutdownRegistered = false;
   private shuttingDown = false;
+  private sockets: Set<WebSocket> = new Set();
+  private socketContexts: WeakMap<WebSocket, SockressSocketContext> = new WeakMap();
+  private socketEventHandlers: Map<string, Set<SockressSocketEventHandler>> = new Map();
+  private readonly logger: SockressLogger;
 
-  constructor(private readonly config: NormalizedOptions) {}
+  constructor(private readonly config: NormalizedOptions) {
+    this.logger = new SockressLogger(config.logging);
+  }
 
   static Router(): SockressRouter {
     return new SockressRouter();
@@ -679,24 +1060,33 @@ export class SockressApp {
       if (item instanceof SockressRouter) {
         const routerStack = item.getStack();
         for (const layer of routerStack.middlewares) {
-          this.middlewares.push({
-            path: path === '/' ? layer.path : `${path}${layer.path === '/' ? '' : layer.path}`,
-            handler: layer.handler,
-            isErrorHandler: layer.isErrorHandler
+          this.stack.push({
+            type: 'middleware',
+            middleware: {
+              path: path === '/' ? layer.path : `${path}${layer.path === '/' ? '' : layer.path}`,
+              handler: layer.handler,
+              isErrorHandler: layer.isErrorHandler
+            }
           });
         }
         for (const route of routerStack.routes) {
-          this.routes.push({
-            method: route.method,
-            matcher: buildMatcher(path === '/' ? route.matcher.raw : `${path}${route.matcher.raw}`),
-            handlers: route.handlers
+          this.stack.push({
+            type: 'route',
+            route: {
+              method: route.method,
+              matcher: buildMatcher(path === '/' ? route.matcher.raw : `${path}${route.matcher.raw}`),
+              handlers: route.handlers
+            }
           });
         }
       } else {
-        this.middlewares.push({
-          path,
-          handler: item as SockressHandler | SockressErrorHandler,
-          isErrorHandler: (item as SockressHandler | SockressErrorHandler).length === 4
+        this.stack.push({
+          type: 'middleware',
+          middleware: {
+            path,
+            handler: item as SockressHandler | SockressErrorHandler,
+            isErrorHandler: (item as SockressHandler | SockressErrorHandler).length === 4
+          }
         });
       }
     }
@@ -712,10 +1102,13 @@ export class SockressApp {
     if (!handlers.length) {
       throw new Error(`Route ${method} ${path} requires at least one handler`);
     }
-    this.routes.push({
-      method,
-      matcher: buildMatcher(path),
-      handlers
+    this.stack.push({
+      type: 'route',
+      route: {
+        method,
+        matcher: buildMatcher(path),
+        handlers
+      }
     });
     return this;
   }
@@ -761,6 +1154,67 @@ export class SockressApp {
     return new SockressAppRoute(this, path);
   }
 
+  /**
+   * Subscribe to realtime events sent from clients via WebSocket.
+   * Use `event="*"` to listen to all events.
+   */
+  on(event: string, handler: SockressSocketEventHandler): () => void {
+    const key = String(event);
+    if (!key) {
+      throw new Error('app.on(event, handler) requires a non-empty event name');
+    }
+    const set = this.socketEventHandlers.get(key) ?? new Set<SockressSocketEventHandler>();
+    set.add(handler);
+    this.socketEventHandlers.set(key, set);
+    return () => this.off(key, handler);
+  }
+
+  off(event: string, handler: SockressSocketEventHandler): void {
+    const key = String(event);
+    const set = this.socketEventHandlers.get(key);
+    if (!set) return;
+    set.delete(handler);
+    if (set.size === 0) {
+      this.socketEventHandlers.delete(key);
+    }
+  }
+
+  /**
+   * Emit a realtime event to all connected websocket clients.
+   * (Socket transport only; HTTP clients won't receive this.)
+   */
+  emit(event: string, data?: unknown): void {
+    const name = String(event);
+    if (!name) return;
+    const message: OutgoingSocketMessage = { type: 'event', event: name, data };
+    const serialized = JSON.stringify(message);
+    for (const socket of this.sockets) {
+      try {
+        if ((socket as any).readyState === (WebSocket as any).OPEN) {
+          socket.send(serialized);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * Emit a realtime event to a specific websocket.
+   */
+  emitTo(socket: WebSocket, event: string, data?: unknown): void {
+    const name = String(event);
+    if (!name) return;
+    const message: OutgoingSocketMessage = { type: 'event', event: name, data };
+    try {
+      if ((socket as any).readyState === (WebSocket as any).OPEN) {
+        socket.send(JSON.stringify(message));
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   listen(port: number, callback?: ListenCallback): http.Server;
   listen(port: number, host: string, callback?: ListenCallback): http.Server;
   listen(port: number, hostOrCallback?: string | ListenCallback, maybeCallback?: ListenCallback): http.Server {
@@ -785,10 +1239,26 @@ export class SockressApp {
         return;
       }
       const origin = req.headers.origin;
-      if (!isOriginAllowed(origin, this.config.cors.origin)) {
-        if (process.env.NODE_ENV !== 'production') {
-          console.warn(`[Sockress] WebSocket connection rejected: origin "${origin}" not allowed. Allowed origins:`, this.config.cors.origin);
+      // React Native/Expo apps might not send origin header, or send null/undefined
+      // Allow connection if origin is missing and CORS is set to allow all
+      if (origin === undefined || origin === null || origin === 'null') {
+        // If CORS allows all origins, allow connection without origin
+        if (this.config.cors.origin === '*') {
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit('connection', ws, req);
+          });
+          return;
         }
+        // Otherwise check if empty origin is explicitly allowed
+        if (Array.isArray(this.config.cors.origin) && this.config.cors.origin.includes('*')) {
+          wss.handleUpgrade(req, socket, head, (ws) => {
+            wss.emit('connection', ws, req);
+          });
+          return;
+        }
+      }
+      if (!isOriginAllowed(origin, this.config.cors.origin)) {
+        this.logger.warn(`[Sockress] WebSocket connection rejected: origin "${origin}" not allowed. Allowed origins:`, this.config.cors.origin);
         socket.destroy();
         return;
       }
@@ -862,7 +1332,13 @@ export class SockressApp {
       const url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`);
       const path = url.pathname || '/';
       const query = parseQuery(url.searchParams);
-      const cookies = req.headers.cookie ? parseCookie(req.headers.cookie) : {};
+      const cookieResult = req.headers.cookie ? parseCookie(req.headers.cookie) : {};
+      const cookies: Record<string, string> = {};
+      for (const [key, value] of Object.entries(cookieResult)) {
+        if (value !== undefined) {
+          cookies[key] = value;
+        }
+      }
       const contentType = (req.headers['content-type'] || '').toLowerCase();
       const skipBodyParsing = contentType.startsWith('multipart/form-data');
       let parsedBody: unknown;
@@ -875,7 +1351,7 @@ export class SockressApp {
       const secure = isSocketEncrypted(req.socket as Socket);
       const originalUrl = req.url || '/';
       const sockressReq = new SockressRequestImpl(
-        nanoid(),
+        generateId(),
         method.toUpperCase() as HTTPMethod,
         path,
         query,
@@ -893,27 +1369,69 @@ export class SockressApp {
         ''
       );
       const origin = pickOrigin(req.headers.origin as string | undefined, this.config.cors.origin);
-      const sockressRes = new SockressResponse({ kind: 'http', req, res }, this.config.cors, origin);
+      const sockressRes = new SockressResponse({ kind: 'http', req, res }, this.config.cors, origin, this.logger);
       if (sockressReq.method === 'OPTIONS') {
         sockressRes.status(204).end();
         return;
       }
       await this.runPipeline(sockressReq, sockressRes);
     } catch (error) {
-      res.statusCode = 500;
-      res.setHeader('content-type', 'application/json; charset=utf-8');
-      res.end(JSON.stringify({ error: 'Internal Server Error', details: error instanceof Error ? error.message : error }));
+      // Check if response headers have already been sent
+      if (!res.headersSent) {
+        try {
+          res.statusCode = 500;
+          res.setHeader('content-type', 'application/json; charset=utf-8');
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          res.end(JSON.stringify({ error: 'Internal Server Error', details: errorMessage }));
+        } catch (sendError) {
+          // If we can't send error response, just log it
+          this.logger.error('[Sockress] Failed to send error response:', sendError);
+        }
+      } else {
+        // Headers already sent, can't send error response
+        this.logger.error('[Sockress] Error occurred after headers were sent:', error);
+      }
     }
   }
 
   private handleSocket(socket: WebSocket & { isAlive?: boolean }, req: IncomingMessage): void {
+    this.sockets.add(socket);
+    const cookieResult = req.headers.cookie ? parseCookie(req.headers.cookie) : {};
+    const cookies: Record<string, string> = {};
+    for (const [key, value] of Object.entries(cookieResult)) {
+      if (value !== undefined) {
+        cookies[key] = value;
+      }
+    }
+    const ctx: SockressSocketContext = {
+      socket,
+      raw: req,
+      headers: req.headers,
+      cookies,
+      ip: getIp(req)
+    };
+    this.socketContexts.set(socket, ctx);
+
     socket.isAlive = true;
     socket.on('pong', () => {
       socket.isAlive = true;
     });
+    socket.on('close', () => {
+      this.sockets.delete(socket);
+      // WeakMap entry will be GC'd automatically
+    });
     socket.on('message', async (raw) => {
       try {
         const payload = JSON.parse(raw.toString()) as IncomingSocketMessage;
+        if (payload.type === 'event') {
+          const eventName = typeof payload.event === 'string' ? payload.event : '';
+          if (!eventName) {
+            return socket.send(JSON.stringify({ type: 'error', message: 'Invalid event name' }));
+          }
+          const current = this.socketContexts.get(socket) ?? ctx;
+          this.dispatchSocketEvent(eventName, payload.data, current);
+          return;
+        }
         if (payload.type !== 'request') {
           return socket.send(JSON.stringify({ type: 'error', message: 'Unsupported message type' }));
         }
@@ -923,13 +1441,19 @@ export class SockressApp {
         const headers = normalizeHeaders(payload.headers ?? {});
         const cookieHeader = headers.cookie;
         const cookieString = Array.isArray(cookieHeader) ? cookieHeader[0] : cookieHeader;
-        const cookies = typeof cookieString === 'string' ? parseCookie(cookieString) : {};
+        const cookieResult = typeof cookieString === 'string' ? parseCookie(cookieString) : {};
+        const cookies: Record<string, string> = {};
+        for (const [key, value] of Object.entries(cookieResult)) {
+          if (value !== undefined) {
+            cookies[key] = value;
+          }
+        }
         const secure = isSocketEncrypted(req.socket as Socket);
         const normalizedPayload = normalizeBodyPayload(payload.body);
         const primaryFile = pickPrimaryFile(normalizedPayload.files);
         const originalUrl = payload.path || '/';
         const sockressReq = new SockressRequestImpl(
-          payload.id ?? nanoid(),
+          payload.id ?? generateId(),
           method,
           path,
           query,
@@ -947,7 +1471,7 @@ export class SockressApp {
           ''
         );
         const origin = pickOrigin(req.headers.origin as string | undefined, this.config.cors.origin);
-        const sockressRes = new SockressResponse({ kind: 'socket', socket, requestId: sockressReq.id }, this.config.cors, origin);
+        const sockressRes = new SockressResponse({ kind: 'socket', socket, requestId: sockressReq.id }, this.config.cors, origin, this.logger);
         await this.runPipeline(sockressReq, sockressRes);
       } catch (error) {
         const outgoing: OutgoingSocketMessage = {
@@ -959,25 +1483,101 @@ export class SockressApp {
     });
   }
 
+  private dispatchSocketEvent(event: string, data: unknown, ctx: SockressSocketContext): void {
+    const direct = this.socketEventHandlers.get(event);
+    if (direct) {
+      for (const handler of direct) {
+        try {
+          handler(data, ctx);
+        } catch (err) {
+          // ignore handler errors to avoid breaking socket loop
+        }
+      }
+    }
+    const wildcard = this.socketEventHandlers.get('*');
+    if (wildcard) {
+      for (const handler of wildcard) {
+        try {
+          handler({ event, data }, ctx);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   private async runPipeline(req: SockressRequest, res: SockressResponse): Promise<void> {
     const stack = this.composeStack(req, req.method);
     let idx = 0;
     const next: NextFunction = async (err?: unknown) => {
       const layer = stack[idx++];
-      if (!layer) {
-        if (err) {
-          this.renderError(err, req, res);
-        } else if (!res.isSent()) {
-          res.status(404).json({ error: 'Not Found' });
+        if (!layer) {
+          if (err) {
+            try {
+              this.renderError(err, req, res);
+            } catch (renderError) {
+              this.logger.error('[Sockress] renderError failed:', renderError);
+              try {
+                const rawRes = res.raw;
+                if (rawRes && !rawRes.headersSent) {
+                  rawRes.statusCode = 500;
+                  rawRes.setHeader('content-type', 'application/json; charset=utf-8');
+                  rawRes.end(JSON.stringify({
+                    error: 'Internal Server Error',
+                    details: err instanceof Error ? err.message : String(err)
+                  }));
+                }
+              } catch (fallbackError) {
+                this.logger.error('[Sockress] Fallback error response also failed:', fallbackError);
+              }
+            }
+          } else if (!res.isSent()) {
+            try {
+              const message = `Cannot ${req.method} ${req.path}`;
+              res.status(404).send(message);
+            } catch (statusError) {
+              this.logger.error('[Sockress] Failed to send 404 response:', statusError);
+              try {
+                const rawRes = res.raw;
+                if (rawRes && !rawRes.headersSent) {
+                  const message = `Cannot ${req.method} ${req.path}`;
+                  rawRes.statusCode = 404;
+                  rawRes.setHeader('content-type', 'text/plain; charset=utf-8');
+                  rawRes.end(message);
+                }
+              } catch (fallbackError) {
+                this.logger.error('[Sockress] Fallback 404 response also failed:', fallbackError);
+              }
+            }
+          }
+          return;
         }
-        return;
-      }
       const handler = layer.handler;
       const isErrorHandler = layer.isErrorHandler;
       try {
         if (err) {
           if (isErrorHandler) {
-            await (handler as SockressErrorHandler)(err, req, res, next);
+            try {
+              const errorHandler = handler as SockressErrorHandler;
+              await errorHandler(err, req, res, next);
+            } catch (handlerError) {
+              if (handlerError instanceof Error && handlerError.message.includes('status is not a function')) {
+                this.renderError(err, req, res);
+                return;
+              }
+              await next(handlerError);
+            }
+          } else if (handler.length === 3) {
+            try {
+              await (handler as any)(err, req, res);
+              return;
+            } catch (handlerError) {
+              if (handlerError instanceof Error && handlerError.message.includes('status is not a function')) {
+                this.renderError(err, req, res);
+                return;
+              }
+              await next(err);
+            }
           } else {
             await next(err);
           }
@@ -997,60 +1597,89 @@ export class SockressApp {
 
   private composeStack(req: SockressRequest, method: HTTPMethod): PipelineLayer[] {
     const { path } = req;
-    const stack: PipelineLayer[] = [];
-    for (const layer of this.middlewares) {
-      if (matchesPrefix(layer.path, path)) {
-        stack.push({
-          handler: layer.handler,
-          isErrorHandler: layer.isErrorHandler
-        });
-      }
-    }
-    for (const route of this.routes) {
-      if (route.method !== method && route.method !== 'ALL') {
-        continue;
-      }
-      const match = route.matcher.match(path);
-      if (!match) continue;
-      req.params = { ...match.params };
-      for (const [paramName, paramValue] of Object.entries(match.params)) {
-        const paramHandler = this.paramHandlers.get(paramName);
-        if (paramHandler) {
-          const wrapped: SockressHandler = (request, res, next) => {
-            request.params = { ...match.params };
-            return paramHandler(request, res, next);
-          };
-          stack.push({ handler: wrapped, isErrorHandler: false });
+    const pipeline: PipelineLayer[] = [];
+    
+    for (const entry of this.stack) {
+      if (entry.type === 'middleware' && entry.middleware) {
+        const layer = entry.middleware;
+        if (matchesPrefix(layer.path, path)) {
+          pipeline.push({
+            handler: layer.handler,
+            isErrorHandler: layer.isErrorHandler
+          });
+        }
+      } else if (entry.type === 'route' && entry.route) {
+        const route = entry.route;
+        if (route.method !== method && route.method !== 'ALL') {
+          continue;
+        }
+        const match = route.matcher.match(path);
+        if (!match) continue;
+        
+        req.params = { ...match.params };
+        
+        for (const [paramName] of Object.entries(match.params)) {
+          const paramHandler = this.paramHandlers.get(paramName);
+          if (paramHandler) {
+            const wrapped: SockressHandler = (request, res, next) => {
+              request.params = { ...match.params };
+              return paramHandler(request, res, next);
+            };
+            pipeline.push({ handler: wrapped, isErrorHandler: false });
+          }
+        }
+        
+        for (const handler of route.handlers) {
+          // Only 4-parameter handlers are error handlers in routes
+          // 3-parameter handlers in routes are regular middleware (req, res, next)
+          const isErrorHandler = handler.length === 4;
+          if (isErrorHandler) {
+            const wrapped: SockressErrorHandler = (err, request, res, next) => {
+              request.params = { ...match.params };
+              return (handler as SockressErrorHandler)(err, request, res, next);
+            };
+            pipeline.push({ handler: wrapped, isErrorHandler: true });
+          } else {
+            const wrapped: SockressHandler = (request, res, next) => {
+              request.params = { ...match.params };
+              return (handler as SockressHandler)(request, res, next);
+            };
+            pipeline.push({ handler: wrapped, isErrorHandler: false });
+          }
         }
       }
-      for (const handler of route.handlers) {
-        const isErrorHandler = handler.length === 4;
-        if (isErrorHandler) {
-          const wrapped: SockressErrorHandler = (err, request, res, next) => {
-            request.params = { ...match.params };
-            return (handler as SockressErrorHandler)(err, request, res, next);
-          };
-          stack.push({ handler: wrapped, isErrorHandler: true });
-        } else {
-          const wrapped: SockressHandler = (request, res, next) => {
-            request.params = { ...match.params };
-            return (handler as SockressHandler)(request, res, next);
-          };
-          stack.push({ handler: wrapped, isErrorHandler: false });
-        }
-      }
     }
-    return stack;
+    
+    return pipeline;
   }
 
   private renderError(err: unknown, req: SockressRequest, res: SockressResponse): void {
     if (res.isSent()) {
+      this.logger.error('[Sockress] Error occurred but response already sent:', err);
       return;
     }
-    res.status(500).json({
-      error: 'Internal Server Error',
-      details: err instanceof Error ? err.message : err
-    });
+    try {
+      res.status(500).json({
+        error: 'Internal Server Error',
+        details: err instanceof Error ? err.message : String(err)
+      });
+    } catch (sendError) {
+      this.logger.error('[Sockress] Failed to send error response:', sendError);
+      this.logger.error('[Sockress] Original error:', err);
+      try {
+        const rawRes = res.raw;
+        if (rawRes && !rawRes.headersSent) {
+          rawRes.statusCode = 500;
+          rawRes.setHeader('content-type', 'application/json; charset=utf-8');
+          rawRes.end(JSON.stringify({
+            error: 'Internal Server Error',
+            details: err instanceof Error ? err.message : String(err)
+          }));
+        }
+      } catch (fallbackError) {
+        this.logger.error('[Sockress] Fallback error response also failed:', fallbackError);
+      }
+    }
   }
 }
 
@@ -1060,6 +1689,24 @@ export function sockress(options?: SockressOptions): SockressApp {
 
 export const createSockress = sockress;
 export const Router = SockressApp.Router;
+
+export default sockress;
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = sockress;
+  module.exports.sockress = sockress;
+  module.exports.createSockress = createSockress;
+  module.exports.Router = Router;
+  module.exports.SockressApp = SockressApp;
+  module.exports.SockressRouter = SockressRouter;
+  module.exports.SockressRoute = SockressRoute;
+  module.exports.SockressAppRoute = SockressAppRoute;
+  module.exports.SockressRequest = SockressRequestImpl;
+  module.exports.SockressResponse = SockressResponse;
+  module.exports.createUploader = createUploader;
+  module.exports.serveStatic = serveStatic;
+  module.exports.default = sockress;
+}
 
 function normalizeOptions(options?: SockressOptions): NormalizedOptions {
   const cors: CorsOptions = {
@@ -1076,7 +1723,8 @@ function normalizeOptions(options?: SockressOptions): NormalizedOptions {
     idleTimeout: options?.socket?.idleTimeout ?? 120_000
   };
   const bodyLimit = options?.bodyLimit ?? 1_000_000;
-  return { cors, socket, bodyLimit };
+  const logging = options?.logging ?? false;
+  return { cors, socket, bodyLimit, logging };
 }
 
 function buildMatcher(path: string): PathMatcher {
@@ -1164,6 +1812,62 @@ function parseBody(buffer: Buffer, contentType?: string): unknown {
   return buffer;
 }
 
+export interface CookieSerializeOptions {
+  path?: string;
+  domain?: string;
+  maxAge?: number;
+  expires?: Date;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: true | 'lax' | 'strict' | 'none';
+}
+
+function parseCookie(str: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!str || typeof str !== 'string') return result;
+  const pairs = str.split(';');
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = pair.slice(0, eqIdx).trim();
+    const value = pair.slice(eqIdx + 1).trim();
+    if (!key) continue;
+    try {
+      result[decodeURIComponent(key)] = decodeURIComponent(value);
+    } catch {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+function serializeCookie(name: string, value: string, options: CookieSerializeOptions = {}): string {
+  const encoded = encodeURIComponent(value);
+  const parts = [`${encodeURIComponent(name)}=${encoded}`];
+  if (options.path != null) parts.push(`Path=${options.path}`);
+  if (options.domain != null) parts.push(`Domain=${options.domain}`);
+  if (options.maxAge != null) parts.push(`Max-Age=${Math.floor(options.maxAge)}`);
+  if (options.expires != null) parts.push(`Expires=${options.expires.toUTCString()}`);
+  if (options.httpOnly) parts.push('HttpOnly');
+  if (options.secure) parts.push('Secure');
+  if (options.sameSite != null) {
+    const s = options.sameSite === true ? 'Strict' : String(options.sameSite);
+    parts.push(`SameSite=${s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()}`);
+  }
+  return parts.join('; ');
+}
+
+const ID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+function generateId(size = 21): string {
+  const bytes = crypto.randomBytes(size);
+  let result = '';
+  for (let i = 0; i < size; i++) {
+    result += ID_ALPHABET[bytes[i]! % 64];
+  }
+  return result;
+}
+
 function parseQuery(searchParams: URLSearchParams): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
   for (const [key, value] of searchParams.entries()) {
@@ -1197,9 +1901,17 @@ function getIp(req: IncomingMessage): string | undefined {
 }
 
 function isOriginAllowed(originHeader: string | undefined, allowed: string | string[]): boolean {
-  if (!originHeader || allowed === '*') return true;
+  // Allow all origins
+  if (allowed === '*') return true;
+  // If no origin header (React Native/Expo might not send it), only allow if '*' is in allowed list
+  if (!originHeader || originHeader === 'null') {
+    if (Array.isArray(allowed)) {
+      return allowed.includes('*');
+    }
+    return false;
+  }
   if (Array.isArray(allowed)) {
-    return allowed.includes(originHeader);
+    return allowed.includes(originHeader) || allowed.includes('*');
   }
   return allowed === originHeader;
 }
@@ -1287,6 +1999,18 @@ function pickPrimaryFile(files?: Record<string, SockressUploadedFile[]>): Sockre
 }
 
 export function createUploader(options?: SockressUploaderOptions): SockressUploader {
+  // Dynamically require multer - it's an optional peer dependency
+  let multer: any;
+  try {
+    multer = require('multer');
+  } catch (err) {
+    throw new Error(
+      'File upload support requires the "multer" package. ' +
+      'Install it with: npm install multer\n' +
+      'Multer is an optional peer dependency to keep Sockress lightweight for users who don\'t need file uploads.'
+    );
+  }
+  
   const storage = multer.memoryStorage();
   const multerInstance = multer({
     storage,
@@ -1440,7 +2164,7 @@ async function persistFilesToDisk(
   await fsp.mkdir(dest, { recursive: true });
   for (const list of Object.values(files)) {
     for (const file of list) {
-      const filename = preserveFilename ? sanitizeFilename(file.name) : `${Date.now()}-${nanoid(8)}${path.extname(file.name || '')}`;
+      const filename = preserveFilename ? sanitizeFilename(file.name) : `${Date.now()}-${generateId(8)}${path.extname(file.name || '')}`;
       const target = path.join(dest, filename);
       await fsp.writeFile(target, file.buffer);
       file.path = target;

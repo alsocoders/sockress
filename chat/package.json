@@ -1,6 +1,6 @@
 {
   "name": "sockress-chat",
-  "version": "0.2.5",
+  "version": "0.2.8",
   "description": "Chat and room management for Sockress - Create rooms, join/leave, and send messages seamlessly.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,8 +11,14 @@
   ],
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.js",
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
       "types": "./dist/index.d.ts"
     },
     "./server": {
@@ -53,11 +59,23 @@
     "messaging"
   ],
   "dependencies": {
-    "nanoid": "^5.0.7",
-    "sockress": "^0.2.7",
-    "sockress-client": "^0.2.5"
+    "nanoid": "^5.1.6"
+  },
+  "peerDependencies": {
+    "sockress": "^0.4.2",
+    "sockress-client": "^0.2.8"
+  },
+  "peerDependenciesMeta": {
+    "sockress": {
+      "optional": true
+    },
+    "sockress-client": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "@types/node": "^20.14.10"
+    "@types/node": "^25.0.0",
+    "sockress": "^0.4.2",
+    "sockress-client": "^0.2.8"
   }
 }

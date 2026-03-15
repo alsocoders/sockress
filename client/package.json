@@ -1,6 +1,6 @@
 {
   "name": "sockress-client",
-  "version": "0.2.5",
+  "version": "0.2.14",
   "description": "Socket-first client SDK for Sockress servers with automatic HTTP fallback and FormData serialization.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
